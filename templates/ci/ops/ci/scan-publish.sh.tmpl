@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Extracted from HQ ops/ci/scan-publish.sh; same OCI verifier and registry client.
+set -euo pipefail
+umask 077
+phase=${1:?expected scan, publish, or cleanup}
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+cleanup() {
+  if [[ -n ${GP_CI_DIR:-} && -d $GP_CI_DIR ]]; then
+    chmod -R u+w "$GP_CI_DIR"
+    rm -rf -- "$GP_CI_DIR"
+  fi
+}
+finish() {
+  status=$?
+  if (( status != 0 )) || [[ $phase != scan ]]; then cleanup; fi
+  exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ $phase == cleanup ]]; then exit 0; fi
+[[ ${GITHUB_SHA:-} =~ ^[a-f0-9]{40}$ ]] || { echo 'Full source SHA required' >&2; exit 1; }
+export IMAGE_SHA="${IMAGE}:sha-${GITHUB_SHA}"
+case "$phase" in
+  scan)
+    GP_CI_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gp-ci.XXXXXX")
+    export GP_CI_DIR
+    printf 'GP_CI_DIR=%s\n' "$GP_CI_DIR" >> "$GITHUB_ENV"
+    export TMPDIR="$GP_CI_DIR"
+    node_digest=$(node "$script_dir/validate.mjs" pin node)
+    build_args=(--opt "build-arg:NODE_DIGEST=$node_digest")
+    kind='{{kind}}'
+    if [[ $kind == static ]]; then
+      nginx_digest=$(node "$script_dir/validate.mjs" pin nginx)
+      build_args+=(--opt "build-arg:NGINX_DIGEST=$nginx_digest")
+    fi
+    buildctl --addr "$BUILDKIT_ADDR" build \
+      --frontend dockerfile.v0 --local context=. --local dockerfile=. \
+      --opt platform=linux/amd64 "${build_args[@]}" \
+      --opt "build-arg:SOURCE_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+      --opt "build-arg:REVISION=${GITHUB_SHA}" \
+      --opt "build-arg:CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --output "type=oci,name=${IMAGE_SHA},tar=false,dest=${GP_CI_DIR}/layout,oci-mediatypes=true,compression=gzip" \
+      --metadata-file "$GP_CI_DIR/build-meta.json" --progress plain
+    python3 "$script_dir/artifact.py" before-scan
+    # HQ's host has flock + persistent /data. Snapshot under lock; never scan a
+    # DB another job can replace. GP_TRIVY_OFFLINE=1 requires a provisioned DB.
+    export GP_TRIVY_SHARED_DIR=${GP_TRIVY_SHARED_DIR:-/data}
+    mkdir -p "$GP_TRIVY_SHARED_DIR" "$GP_CI_DIR/trivy-cache"
+    # The child bash expands these exported variables under the lock.
+    # shellcheck disable=SC2016
+    flock "$GP_TRIVY_SHARED_DIR/trivy-cache.lock" bash -euc '
+      if [[ ${GP_TRIVY_OFFLINE:-0} != 1 ]]; then
+        trivy image --download-db-only --cache-dir "$GP_TRIVY_SHARED_DIR/trivy-cache"
+      fi
+      cp -R "$GP_TRIVY_SHARED_DIR/trivy-cache/db" "$GP_CI_DIR/trivy-cache/db"
+      chmod -R a-w "$GP_CI_DIR/trivy-cache/db"
+    '
+    node "$script_dir/validate.mjs" scan-policy "$GP_CI_DIR"
+    trivy image --skip-db-update --skip-java-db-update --offline-scan --skip-version-check \
+      --cache-dir "$GP_CI_DIR/trivy-cache" --input "$GP_CI_DIR/layout" \
+      --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+      --ignorefile .trivyignore.yaml --no-progress
+    trivy image --skip-db-update --skip-java-db-update --offline-scan --skip-version-check \
+      --cache-dir "$GP_CI_DIR/trivy-cache" --input "$GP_CI_DIR/layout" \
+      --format cyclonedx --output "$GP_CI_DIR/sbom.json" --no-progress
+    python3 "$script_dir/artifact.py" after-scan
+    ;;
+  publish)
+    [[ ${GITHUB_EVENT_NAME:-} == push && ${GITHUB_REF:-} == refs/heads/main ]] || exit 1
+    [[ -n ${REGISTRY_TOKEN:-} ]] || { echo 'REGISTRY_TOKEN is required' >&2; exit 1; }
+    python3 "$script_dir/artifact.py" publish
+    ;;
+  *) echo 'Unknown CI phase' >&2; exit 1 ;;
+esac

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Verify and transfer one BuildKit OCI image, using only Python's stdlib.
+
+No rebuild, format conversion, registry-side copy, or external push CLI. The
+registry receives the exact manifest/config/compressed layers read by Trivy.
+"""
+import base64
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import stat
+import urllib.error
+import urllib.parse
+import urllib.request
+
+MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+CONFIG = "application/vnd.oci.image.config.v1+json"
+LAYER = "application/vnd.oci.image.layer.v1.tar"
+
+
+class Refusal(Exception):
+    """A deliberately public, credential-free refusal message."""
+
+
+def require(condition, message):
+    if not condition:
+        raise Refusal(message)
+
+
+def digest(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def stream_digest(stream):
+    sha = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        sha.update(chunk)
+    return "sha256:" + sha.hexdigest()
+
+
+def read_json(path):
+    # Missing, empty and malformed metadata all fail closed. No defaults.
+    return json.loads(path.read_bytes())
+
+
+class Layout:
+    def __init__(self, directory):
+        self.path = directory / "layout"
+
+    def member(self, name):
+        # The allowlist walk checks parents; O_NOFOLLOW also protects the leaf.
+        fd = os.open(self.path / name, os.O_RDONLY | os.O_NOFOLLOW)
+        stream = os.fdopen(fd, "rb")
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            stream.close()
+            raise Refusal("OCI member must be a regular file with no hardlinks")
+        return stream
+
+    def blob(self, descriptor):
+        value = descriptor["digest"]
+        require(re.fullmatch(r"sha256:[0-9a-f]{64}", value), "invalid OCI digest")
+        try:
+            stream = self.member("blobs/sha256/" + value[7:])
+        except FileNotFoundError:
+            raise Refusal("referenced OCI blob is missing") from None
+        if os.fstat(stream.fileno()).st_size != descriptor["size"]:
+            stream.close()
+            raise Refusal("OCI size mismatch")
+        return stream
+
+    def verify(self, metadata):
+        require(stat.S_ISDIR(self.path.lstat().st_mode), "OCI layout must be a directory")
+        entries = []
+        def walk(directory):
+            for path in sorted(directory.iterdir()):
+                name = path.relative_to(self.path).as_posix()
+                info = path.lstat()
+                is_directory = name in ("blobs", "blobs/sha256")
+                allowed = is_directory or name in ("oci-layout", "index.json") or bool(
+                    re.fullmatch(r"blobs/sha256/[0-9a-f]{64}", name))
+                require(allowed, "unexpected OCI layout entry")
+                if is_directory:
+                    require(stat.S_ISDIR(info.st_mode), "OCI blob directory must not be a symlink")
+                    walk(path)
+                else:
+                    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                            "OCI member must be a regular file with no hardlinks")
+                    with self.member(name) as stream:
+                        value = stream_digest(stream)
+                    if name.startswith("blobs/sha256/"):
+                        require(value == "sha256:" + path.name, "OCI blob digest mismatch")
+                    entries.append((name, value))
+        walk(self.path)
+        # Canonical UTF-8 JSON of sorted [relative path, sha256:<hex>] pairs.
+        layout_digest = digest(json.dumps(sorted(entries), separators=(",", ":")).encode())
+        with self.member("oci-layout") as stream:
+            require(json.load(stream)["imageLayoutVersion"] == "1.0.0", "unsupported OCI layout")
+        with self.member("index.json") as stream:
+            index = json.load(stream)
+        require(index["schemaVersion"] == 2 and len(index["manifests"]) == 1,
+                "expected exactly one image (no index/attestation fanout)")
+        descriptor = index["manifests"][0]
+        require(descriptor["mediaType"] == MANIFEST, "expected OCI image manifest")
+        with self.blob(descriptor) as stream:
+            self.manifest_bytes = stream.read()
+        require(digest(self.manifest_bytes) == descriptor["digest"], "manifest digest mismatch")
+        manifest = json.loads(self.manifest_bytes)
+        require(manifest["schemaVersion"] == 2 and manifest["mediaType"] == MANIFEST,
+                "unsupported image manifest")
+        config_descriptor = manifest["config"]
+        reachable = {item["digest"] for item in [descriptor, config_descriptor, *manifest["layers"]]}
+        present = {value for name, value in entries if name.startswith("blobs/sha256/")}
+        require(not reachable - present, "referenced OCI blob is missing")
+        require(present == reachable, "orphan OCI blob")
+        require(config_descriptor["mediaType"] == CONFIG, "unsupported image config")
+        with self.blob(config_descriptor) as stream:
+            config_bytes = stream.read()
+        config_digest = digest(config_bytes)
+        require(config_digest == config_descriptor["digest"], "config blob digest mismatch")
+        require(metadata["containerimage.config.digest"] == config_digest,
+                "BuildKit config digest differs from scanned layout")
+        require(metadata["containerimage.digest"] == descriptor["digest"],
+                "BuildKit manifest digest differs from scanned layout")
+        config = json.loads(config_bytes)
+        require(config["os"] == "linux" and config["architecture"] == "amd64",
+                "expected linux/amd64")
+        require(config["rootfs"]["type"] == "layers", "unsupported rootfs")
+        diff_ids = config["rootfs"]["diff_ids"]
+        require(len(diff_ids) == len(manifest["layers"]), "layer count mismatch")
+        for layer, diff_id in zip(manifest["layers"], diff_ids):
+            require(layer["mediaType"] in (LAYER, LAYER + "+gzip"), "unsupported layer compression")
+            with self.blob(layer) as stream:
+                require(stream_digest(stream) == layer["digest"], "layer digest mismatch")
+            with self.blob(layer) as stream:
+                if layer["mediaType"].endswith("+gzip"):
+                    with gzip.GzipFile(fileobj=stream) as uncompressed:
+                        actual_diff_id = stream_digest(uncompressed)
+                else:
+                    actual_diff_id = stream_digest(stream)
+            require(actual_diff_id == diff_id, "layer diff_id mismatch")
+        self.blobs = [config_descriptor, *manifest["layers"]]
+        return {"layout_digest": layout_digest, "config_digest": config_digest,
+                "manifest_digest": descriptor["digest"], "diff_ids": diff_ids}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward credentials to a registry-provided alternate host.
+        return None
+
+
+class Registry:
+    """Narrow Distribution v2 client: same-origin HTTPS, Basic/Bearer auth.
+
+    Failures stop publication/promotion; no generic retries of registry writes.
+    A layer streams from the layout, so memory does not scale with image size.
+    """
+    def __init__(self):
+        host, image = os.environ["REGISTRY"], os.environ["IMAGE"]
+        require(re.fullmatch(r"[a-zA-Z0-9.-]+(?::[0-9]+)?", host), "invalid registry host")
+        require(image.startswith(host + "/"), "image is outside registry")
+        repository = image[len(host) + 1:]
+        require(re.fullmatch(r"[a-z0-9_-]+(?:[./][a-z0-9_-]+)*", repository), "invalid repository")
+        self.origin = "https://" + host
+        self.base = self.origin + "/v2/" + repository
+        self.scope = "repository:" + repository + ":pull,push"
+        credentials = os.environ["REGISTRY_USER"] + ":" + os.environ["REGISTRY_TOKEN"]
+        self.basic = "Basic " + base64.b64encode(credentials.encode()).decode()
+        self.auth = self.basic
+        self.opener = urllib.request.build_opener(NoRedirect)
+
+    def safe_url(self, location):
+        url = urllib.parse.urljoin(self.origin + "/", location)
+        parsed = urllib.parse.urlsplit(url)
+        require(parsed.scheme + "://" + parsed.netloc == self.origin
+                and not parsed.username and not parsed.fragment, "refused foreign registry URL")
+        return url
+
+    def request(self, method, url, expected, data=None, headers=None, authenticate=True):
+        expected = (expected,) if isinstance(expected, int) else expected
+        url = self.safe_url(url)
+        if hasattr(data, "seek"):
+            data.seek(0)
+        request = urllib.request.Request(url, data=data, method=method,
+                                         headers={**(headers or {}), "Authorization": self.auth})
+        try:
+            response = self.opener.open(request, timeout=120)
+        except urllib.error.HTTPError as error:
+            challenge = error.headers.get("WWW-Authenticate", "")
+            if error.code != 401 or not authenticate or not challenge.lower().startswith("bearer "):
+                if error.code == 404 and 404 in expected:
+                    return error
+                raise Refusal("registry request failed: " + str(error.code)) from None
+            parameters = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+            realm = self.safe_url(parameters["realm"])
+            parsed = urllib.parse.urlsplit(realm)
+            query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) + [
+                ("service", parameters.get("service", "")), ("scope", self.scope)]
+            token_url = urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query)))
+            token_request = urllib.request.Request(token_url, headers={"Authorization": self.basic})
+            with self.opener.open(token_request, timeout=120) as token_response:
+                token = json.load(token_response)
+            value = token.get("token") or token["access_token"]
+            require(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._~+/=-]+", value),
+                    "invalid bearer token charset")
+            self.auth = "Bearer " + value
+            return self.request(method, url, expected, data, headers, authenticate=False)
+        require(response.status in expected, "unexpected registry status: " + str(response.status))
+        return response
+
+    def publish(self, layout, identity, tags):
+        for tag in tags:
+            require(re.fullmatch(r"[a-zA-Z0-9_.-]+", tag), "invalid image tag")
+            if tag.startswith("sha-"):
+                with self.request("HEAD", self.base + "/manifests/" + tag, (200, 404),
+                                  headers={"Accept": MANIFEST}) as response:
+                    require(response.status == 404 or
+                            response.headers.get("Docker-Content-Digest") == identity["manifest_digest"],
+                            "existing SHA tag has a different digest")
+        for descriptor in layout.blobs:
+            with self.request("HEAD", self.base + "/blobs/" + descriptor["digest"], (200, 404)) as response:
+                if response.status == 200:
+                    continue
+            with self.request("POST", self.base + "/blobs/uploads/", 202, data=b"") as response:
+                location = self.safe_url(response.headers["Location"])
+            parsed = urllib.parse.urlsplit(location)
+            query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) + [("digest", descriptor["digest"])]
+            location = urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query)))
+            with layout.blob(descriptor) as blob:
+                with self.request("PUT", location, 201, data=blob, headers={
+                    "Content-Type": "application/octet-stream", "Content-Length": str(descriptor["size"])
+                }):
+                    pass
+        for tag in tags:
+            require(re.fullmatch(r"[a-zA-Z0-9_.-]+", tag), "invalid image tag")
+            with self.request("PUT", self.base + "/manifests/" + tag, 201,
+                              data=layout.manifest_bytes, headers={"Content-Type": MANIFEST}) as response:
+                require(response.headers.get("Docker-Content-Digest") == identity["manifest_digest"],
+                        "registry published digest differs from scanned manifest")
+        # Resolve the published tag independently and compare the returned bytes.
+        for tag in tags:
+            with self.request("GET", self.base + "/manifests/" + tag, 200,
+                              headers={"Accept": MANIFEST}) as response:
+                require(response.headers.get("Docker-Content-Digest") == identity["manifest_digest"]
+                        and digest(response.read()) == identity["manifest_digest"],
+                        "resolved registry digest differs from scanned manifest")
+        return identity["manifest_digest"]
+
+
+def append_env(path_variable, text):
+    with open(os.environ[path_variable], "a") as stream:
+        stream.write(text + "\n")
+
+
+def main():
+    directory = Path(os.environ["GP_CI_DIR"])
+    phase = sys.argv[1]
+    layout = Layout(directory)
+    identity = layout.verify(read_json(directory / "build-meta.json"))
+    if phase == "before-scan":
+        (directory / "before-scan.json").write_text(json.dumps(identity) + "\n")
+        return
+    previous = read_json(directory / ("before-scan.json" if phase == "after-scan" else "scanned.json"))
+    require(identity == previous, "layout identity changed since scan started")
+    if phase == "after-scan":
+        (directory / "scanned.json").write_text(json.dumps(identity, indent=2) + "\n")
+        append_env("GITHUB_OUTPUT", "scanned_config_digest=" + identity["config_digest"])
+        append_env("GITHUB_STEP_SUMMARY", "\nImage: `" + os.environ["IMAGE_SHA"] + "`\n"
+                   + "Scanned config: `" + identity["config_digest"] + "`\n"
+                   + "Scanned OCI manifest: `" + identity["manifest_digest"] + "`\n"
+                   + "Scanned layout: `" + identity["layout_digest"] + "`\n"
+                   + "Source: `" + os.environ["GITHUB_SHA"] + "` (`" + os.environ["GITHUB_REF"] + "`)\n"
+                   + "Scan passed. Publication is recorded separately below for main pushes only.\n"
+                   + "Local activation: not performed. Cluster activation: not observed; "
+                   + "promote-dev writes gitops and ArgoCD syncs separately.")
+    elif phase == "publish":
+        sha_tag = os.environ["IMAGE_SHA"].removeprefix(os.environ["IMAGE"] + ":")
+        published = Registry().publish(layout, identity, [sha_tag])
+        append_env("GITHUB_OUTPUT", "scanned_config_digest=" + identity["config_digest"])
+        append_env("GITHUB_OUTPUT", "digest=" + published)
+        append_env("GITHUB_STEP_SUMMARY", "\nPublished SHA tag: scanned config `"
+                   + identity["config_digest"] + "` → published digest `" + published + "`.\n"
+                   + "Registry confirmed the exact scanned OCI manifest. This is not an activation receipt.")
+    else:
+        raise Refusal("unknown artifact phase")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        # Do not include request URLs, headers or credential-bearing exceptions.
+        print("CI artifact refused: " + (str(error) if isinstance(error, Refusal)
+                                         else type(error).__name__), file=sys.stderr)
+        sys.exit(1)

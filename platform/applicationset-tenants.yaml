@@ -1,0 +1,46 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: tenants
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  goTemplate: true
+  goTemplateOptions: [missingkey=error]
+  generators:
+    - git:
+        repoURL: https://git.example.com/platform/gitops.git
+        revision: deploy
+        # The */overlays/* contract restricted at discovery to dev and prod.
+        directories:
+          - path: clusters/homelab/tenants/*/overlays/dev
+          - path: clusters/homelab/tenants/*/overlays/prod
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  template:
+    metadata:
+      name: '{{ index .path.segments 3 }}-{{ .path.basename }}'
+      labels:
+        golden-path/tenant: '{{ index .path.segments 3 }}'
+        golden-path/environment: '{{ .path.basename }}'
+    spec:
+      project: tenants
+      source:
+        repoURL: https://git.example.com/platform/gitops.git
+        targetRevision: deploy
+        path: '{{ .path.path }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ index .path.segments 3 }}-{{ .path.basename }}'
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=false
+  templatePatch: |
+    {{- if eq .path.basename "dev" }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+    {{- end }}

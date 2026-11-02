@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: {{tenant}}-{{env}}
+resources:
+  - ../../base
+  - ../../base/observe
+  - ingress.yaml
+labels:
+  - pairs:
+      golden-path/tenant: {{tenant}}
+      golden-path/environment: {{env}}
+    includeSelectors: false
+    includeTemplates: true
+# UNRELEASED is an offline scaffold marker, never a deployable release.
+# Promotion writes newTag AND digest: sha256:<verified artifact digest> here.
+# Prod promotion copies the accepted dev digest; prod sync always stays manual.
+images:
+  - name: {{image}}
+    newName: {{image}}
+    newTag: {{image_tag}}
+replicas:
+  - name: {{tenant}}
+    count: 1

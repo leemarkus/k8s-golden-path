@@ -1,0 +1,36 @@
+{
+  "apiVersion": "monitoring.coreos.com/v1",
+  "kind": "ServiceMonitor",
+  "metadata": {
+    "name": "{{tenant}}-metrics",
+    "namespace": "{{tenant}}-dev",
+    "labels": {
+      "app.kubernetes.io/name": "{{tenant}}",
+      "tenant": "{{tenant}}",
+      "env": "dev",
+      "release": "kube-prometheus-stack"
+    }
+  },
+  "spec": {
+    "namespaceSelector": {
+      "matchNames": [
+        "{{tenant}}-dev"
+      ]
+    },
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "{{tenant}}",
+        "golden-path/metrics": "enabled"
+      }
+    },
+    "endpoints": [
+      {
+        "port": "metrics",
+        "path": "/metrics",
+        "interval": "30s",
+        "scrapeTimeout": "10s",
+        "honorLabels": false
+      }
+    ]
+  }
+}

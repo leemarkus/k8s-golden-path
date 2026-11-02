@@ -1,0 +1,62 @@
+{
+  "_comment": "UNEXECUTED synthetic turns, not captured evidence or model output. Even SRE dry-run dispatches real read-only tools. This documentation authorizes neither replay nor live access.",
+  "turns": [
+    {
+      "text": "Inspect the affected namespace before inferring user impact; preserve timestamps and report permission or empty-result gaps.",
+      "tool_uses": [
+        {
+          "name": "kubectl_read",
+          "input": {
+            "subcommand": "get",
+            "namespace": "__TENANT__-__ENV__",
+            "resource": "deployments",
+            "output": "wide"
+          }
+        },
+        {
+          "name": "kubectl_read",
+          "input": {
+            "subcommand": "get",
+            "namespace": "__TENANT__-__ENV__",
+            "resource": "pods",
+            "output": "wide"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Inspect service backends and ingress. Present objects do not prove current Prometheus ingestion or requests.",
+      "tool_uses": [
+        {
+          "name": "kubectl_read",
+          "input": {
+            "subcommand": "get",
+            "namespace": "__TENANT__-__ENV__",
+            "resource": "endpointslices",
+            "output": "yaml"
+          }
+        },
+        {
+          "name": "kubectl_read",
+          "input": {
+            "subcommand": "get",
+            "namespace": "__TENANT__-__ENV__",
+            "resource": "ingresses",
+            "output": "yaml"
+          }
+        },
+        {
+          "name": "kubectl_read",
+          "input": {
+            "subcommand": "get",
+            "namespace": "__TENANT__-__ENV__",
+            "resource": "events"
+          }
+        }
+      ]
+    },
+    {
+      "text": "UNPOPULATED TEMPLATE: no tool results are recorded here. Obtain independently timestamped source-liveness, request denominators and both burn windows before ranking a cause. Current health and incident-time evidence remain unknown. Do not present a scripted known-good report as a measured result."
+    }
+  ]
+}

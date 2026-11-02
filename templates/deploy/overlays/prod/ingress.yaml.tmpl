@@ -1,0 +1,21 @@
+# HQ pattern: plain HTTP ingress behind upstream NPM TLS termination.
+# live activation must provision internal DNS/NPM and prove no public forwarding.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{tenant}}
+  labels:
+    app.kubernetes.io/name: {{tenant}}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{host}}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{tenant}}
+                port:
+                  name: http

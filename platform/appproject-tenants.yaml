@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: tenants
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  description: Golden-path namespaced workloads; namespace budgets belong to platform.
+  sourceRepos:
+    - https://git.example.com/platform/gitops.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: '*-dev'
+    - server: https://kubernetes.default.svc
+      namespace: '*-prod'
+    - server: https://kubernetes.default.svc
+      namespace: '!hq-dev'
+    - server: https://kubernetes.default.svc
+      namespace: '!hq-prod'
+    - server: https://kubernetes.default.svc
+      namespace: '!kube-*'
+    - server: https://kubernetes.default.svc
+      namespace: '!argocd'
+    - server: https://kubernetes.default.svc
+      namespace: '!monitoring'
+    - server: https://kubernetes.default.svc
+      namespace: '!ingress-nginx'
+    - server: https://kubernetes.default.svc
+      namespace: '!default'
+  clusterResourceWhitelist: []
+  clusterResourceBlacklist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: LimitRange

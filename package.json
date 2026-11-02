@@ -1,0 +1,8 @@
+{
+  "name": "golden-path",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26" },
+  "scripts": { "test": "node --test", "verify": "node scripts/verify.mjs" },
+  "bin": { "gp": "bin/gp" }
+}

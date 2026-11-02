@@ -1,0 +1,42 @@
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+export function requireDigest(value) {
+  if (typeof value !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value)) throw Error('Expected a verified sha256 digest');
+  return value;
+}
+export function validateIgnores(policy, now = Date.now()) {
+  if (!policy || Object.keys(policy).some(key => key !== 'vulnerabilities') || !Array.isArray(policy.vulnerabilities)) {
+    throw Error('Expected only a vulnerabilities array; blanket ignores are forbidden');
+  }
+  const seen = new Set();
+  for (const entry of policy.vulnerabilities) {
+    if (!entry || !/^(CVE-\d{4}-\d{4,}|GHSA-[a-z0-9-]+)$/.test(entry.id ?? '') || seen.has(entry.id)) throw Error('Invalid or duplicate advisory ID');
+    seen.add(entry.id);
+    for (const key of ['statement', 'owner', 'review']) if (typeof entry[key] !== 'string' || !entry[key].trim()) throw Error(`Missing reviewed-entry ${key}`);
+    // Trivy's native schema calls the reason "statement" and the expiry "expired_at".
+    const date = entry.expired_at;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '') || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date || Date.parse(date) <= now) throw Error('Expired or invalid ignore expiry (UTC)');
+    if (Object.keys(entry).some(key => !['id', 'statement', 'owner', 'review', 'expired_at'].includes(key))) throw Error('Unsupported ignore field');
+  }
+}
+export function validateDatabase(metadata, now = Date.now()) {
+  const updated = Date.parse(metadata.UpdatedAt);
+  if (metadata.Version !== 2 || !Number.isFinite(updated) || updated > now + 300000 || now - updated > 24 * 3600000) throw Error('Trivy DB must be schema 2, at most 24h old, and not future-dated');
+}
+function hash(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const [mode, argument] = process.argv.slice(2);
+  if (mode === 'pin') {
+    console.log(requireDigest(JSON.parse(fs.readFileSync('ops/ci/base-images.json'))[argument]));
+  } else if (mode === 'scan-policy') {
+    validateIgnores(JSON.parse(fs.readFileSync('.trivyignore.yaml')));
+    const metadata = JSON.parse(fs.readFileSync(`${argument}/trivy-cache/db/metadata.json`));
+    validateDatabase(metadata);
+    fs.writeFileSync(`${argument}/scan-policy.json`, JSON.stringify({
+      checkedAt: new Date().toISOString(), databaseUpdatedAt: metadata.UpdatedAt,
+      databaseSHA256: hash(`${argument}/trivy-cache/db/trivy.db`),
+      ignoreSHA256: hash('.trivyignore.yaml'), severity: ['HIGH', 'CRITICAL'],
+    }, null, 2) + '\n');
+  } else throw Error('Unknown validation mode');
+}

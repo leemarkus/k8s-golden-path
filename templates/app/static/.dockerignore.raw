@@ -1,0 +1,10 @@
+.git
+node_modules
+coverage
+.gp-tmp
+.env
+.env.*
+.secrets
+**/.env
+**/.env.*
+**/.secrets

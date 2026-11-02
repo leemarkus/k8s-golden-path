@@ -1,0 +1,7 @@
+.gp-tmp/
+node_modules/
+coverage/
+.env
+.env.*
+.secrets/
+.DS_Store

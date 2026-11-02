@@ -1,0 +1,12 @@
+import http from 'node:http';
+const server = http.createServer((request, response) => {
+  response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
+  response.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (request.url === '{{health_path}}') response.end('ok\n');
+  else if (request.url === '/') response.end('{{tenant}}\n');
+  else { response.statusCode = 404; response.end('not found\n'); }
+});
+server.listen({{port}}, '0.0.0.0');
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close());

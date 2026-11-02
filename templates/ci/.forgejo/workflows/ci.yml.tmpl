@@ -1,0 +1,101 @@
+{
+  "name": "ci",
+  "on": {
+    "push": {
+      "branches": [
+        "main"
+      ]
+    },
+    "pull_request": {
+      "branches": [
+        "main"
+      ]
+    }
+  },
+  "concurrency": {
+    "group": "ci-${{ github.ref }}",
+    "cancel-in-progress": true
+  },
+  "env": {
+    "REGISTRY": "registry.example.com",
+    "IMAGE": "{{image}}",
+    "BUILDKIT_ADDR": "tcp://buildkitd.ci.svc.cluster.local:1234",
+    "REGISTRY_USER": "ci-bot"
+  },
+  "jobs": {
+    "checks": {
+      "runs-on": "docker",
+      "steps": [
+        {
+          "uses": "actions/checkout@v4"
+        },
+        {
+          "name": "Tenant tests",
+          "run": "npm test"
+        }
+      ]
+    },
+    "build-scan-publish": {
+      "runs-on": "docker",
+      "needs": [
+        "checks"
+      ],
+      "outputs": {
+        "digest": "${{ steps.publish.outputs.digest }}"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4"
+        },
+        {
+          "name": "Build once, scan HIGH and CRITICAL, record SBOM",
+          "run": "bash ops/ci/scan-publish.sh scan"
+        },
+        {
+          "uses": "actions/upload-artifact@v3",
+          "with": {
+            "name": "sbom-${{ github.sha }}",
+            "path": "${{ env.GP_CI_DIR }}/sbom.json\n${{ env.GP_CI_DIR }}/scanned.json\n${{ env.GP_CI_DIR }}/scan-policy.json\n",
+            "if-no-files-found": "error"
+          }
+        },
+        {
+          "name": "Push exact scanned bytes and resolve digest",
+          "id": "publish",
+          "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+          "env": {
+            "REGISTRY_TOKEN": "${{ secrets.REGISTRY_TOKEN }}"
+          },
+          "run": "bash ops/ci/scan-publish.sh publish"
+        },
+        {
+          "name": "Clean job artifacts",
+          "if": "always()",
+          "run": "bash ops/ci/scan-publish.sh cleanup"
+        }
+      ]
+    },
+    "promote-dev": {
+      "runs-on": "docker",
+      "needs": [
+        "build-scan-publish"
+      ],
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      "env": {
+        "GITOPS_REPO": "git.example.com/platform/gitops",
+        "OVERLAY": "clusters/homelab/tenants/{{tenant}}/overlays/dev",
+        "DIGEST": "${{ needs.build-scan-publish.outputs.digest }}",
+        "GITOPS_TOKEN": "${{ secrets.GITOPS_TOKEN }}"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4"
+        },
+        {
+          "name": "Commit dev SHA tag and immutable digest to gitops",
+          "run": "bash ops/ci/promote-dev.sh"
+        }
+      ]
+    }
+  }
+}

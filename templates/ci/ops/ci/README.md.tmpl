@@ -1,0 +1,146 @@
+# {{tenant}} build and promotion
+
+Extracted from HQ `.forgejo/workflows/ci.yml`, `ops/ci/scan-publish.sh` and
+`ops/ci/artifact.py` (read-only reference, 2026-10-03). The `docker` runner label
+selects HQ's host executor, not a Docker daemon. It needs node/npm, buildctl,
+python3, trivy, flock, git and kustomize. BuildKit lives at
+`tcp://buildkitd.ci.svc.cluster.local:1234`. No cluster credential belongs in CI.
+The workflow uses JSON syntax, a YAML subset, for dependency-free structural
+validation with Node. The workflow inherits HQ's checkout@v4/upload-artifact@v3 references; resolve and
+review immutable action commits in the authorized network session before activation.
+
+## Complete the build contract
+
+`npm test` is a minimal example gate. Replace it with the tenant's real tests
+and required installs (use a committed lockfile and `npm ci` when adding deps).
+For static sites, the marked Dockerfile builder body is the tenant-specific
+part: run your own build and emit `/build/dist`. Preserve the runner contract.
+The included builder only copies index.html; it needs no dependency download.
+Node includes a zero-dependency Node 22 HTTP example. Add locked dependencies
+and compile steps in its builder as needed; keep runtime artifacts in `/app`.
+
+Both bases use mandatory digest arguments. `ops/ci/base-images.json` starts
+with EMPTY strings, so CI refuses to build before reviewed pins are recorded.
+No pin in this scaffold is a deployable example digest.
+
+In an explicitly authorized network-enabled session, resolve approved bases:
+
+```sh
+docker buildx imagetools inspect node:22-alpine
+docker buildx imagetools inspect nginxinc/nginx-unprivileged:alpine
+```
+
+Record each reported `Digest: sha256:...` verbatim as `node` / `nginx` in
+`ops/ci/base-images.json`, plus the source tag, resolution date, platform and
+approval in your change review. An OCI index pin is valid if it contains the
+approved linux/amd64 image; inspect its child manifest too. Re-inspect by digest,
+cache the approved linux/amd64 bases, and verify runtime USER and executable
+availability. Never derive a digest from a tag string. Update via reviewed PRs.
+Node kind only requires `node`; static requires both. The digest arguments
+always accompany fixed repository names in FROM, so tag movement cannot change
+bytes. Empty arguments intentionally fail closed. Local example:
+
+```sh
+NODE_DIGEST=$(node ops/ci/validate.mjs pin node)
+NGINX_DIGEST=$(node ops/ci/validate.mjs pin nginx) # static only
+docker build --pull=false --network=none \
+  --build-arg NODE_DIGEST="$NODE_DIGEST" \
+  --build-arg NGINX_DIGEST="$NGINX_DIGEST" \
+  --build-arg SOURCE_URL=https://git.example.com/apps/{{tenant}} \
+  --build-arg REVISION="$(git rev-parse HEAD)" \
+  --build-arg CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t {{tenant}}:local .
+```
+
+Static: `USER 101:101`, port 8080; mount a size-limited emptyDir at `/tmp`
+with pod fsGroup 101. Nginx pid plus client/proxy/fastcgi/uwsgi/scgi temp dirs
+are under that mount; logs go to stdout/stderr. Its direct entrypoint avoids
+upstream startup scripts rewriting `/etc/nginx` on a read-only root. Node:
+`USER 1000:1000`, port 3000, no runtime writes; added scratch needs an emptyDir
+at `/tmp` with fsGroup 1000. Both require readOnlyRootFilesystem, drop ALL,
+allowPrivilegeEscalation false and RuntimeDefault seccomp in deployment.
+Verify `/healthz` under these constraints before activation; a Dockerfile
+HEALTHCHECK supplements, and does not replace, Kubernetes probes.
+
+```sh
+# Static; for node use uid 1000, port 3000 and /app/server.mjs image defaults.
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=101,gid=101 \
+  -p 127.0.0.1:8080:8080 {{tenant}}:local
+# From another terminal: curl --fail http://127.0.0.1:8080/healthz
+```
+
+## Scan and exact-byte publication
+
+One BuildKit export produces a single linux/amd64 OCI image. The extracted
+verifier checks metadata, manifest, config, compressed layers, diff IDs and
+layout identity before and after scanning and before publishing. It rejects
+fanout, symlinks, orphan blobs and changed content. The stdlib registry client
+uploads these exact bytes, authenticating with `REGISTRY_USER=ci-bot` and
+`REGISTRY_TOKEN` (secret by name only). It then GETs the published manifest and
+compares both response digest and bytes to the scanned identity. No rebuild.
+
+Trivy fails HIGH and CRITICAL, including unfixed issues. The shared vulnerability
+DB is refreshed under a lock, copied read-only per job and required to be at
+most 24 hours old (UTC UpdatedAt). `GP_TRIVY_OFFLINE=1` skips refresh and still
+requires a provisioned fresh DB; absence/staleness fails CI, and local evidence
+must say incomplete. The artifact receipt includes database and allowlist
+hashes. An SBOM and scan receipts are uploaded even for PRs that pass scanning.
+PRs never receive publication/promotion secrets from this workflow.
+
+`.trivyignore.yaml` deliberately uses JSON syntax (a YAML subset) so the
+zero-dependency validator can fail closed. Keep the empty list unless reviewed.
+An entry format (replace every descriptive value; do not copy as an exception):
+
+```json
+{
+  "vulnerabilities": [{
+    "id": "CVE-YYYY-NNNN",
+    "statement": "Reason this scoped finding is temporarily accepted",
+    "owner": "Named accountable owner",
+    "review": "URL of approving review",
+    "expired_at": "YYYY-MM-DD"
+  }]
+}
+```
+
+Trivy uses `statement` for reason and `expired_at` for expiry. Expiry is midnight
+UTC at the start of the date; expired, malformed, duplicate or incomplete
+entries fail before scanning. Wildcards, ignore-unfixed and severity downgrades
+are not supported. Review should justify image-specific scope and removal.
+
+## Dev and manual prod promotion
+
+Only a main push publishes `sha-<full 40-character source SHA>`. The registry
+client refuses a different existing SHA-tag digest. A dedicated gitops-bot
+`GITOPS_TOKEN` allows HQ's clone → kustomize edit → bot commit → normal push
+mechanism. The only edited file is
+`clusters/homelab/tenants/{{tenant}}/overlays/dev/kustomization.yaml`.
+It records BOTH `newTag` and `digest`. One rejected push permits one rebase and
+retry; another rejection fails. No force push, prod edit or cluster access.
+Bot identity/repo membership contains the token; no claim of per-repo PAT scope.
+The token is supplied by askpass and never placed in a clone URL or git config.
+
+Prod promotion is a MANUAL PR after dev acceptance, not an app rebuild:
+
+1. In an authorized gitops checkout, branch from current main. Read the exact
+   dev image entry and its CI scanned/published digest receipt; verify agreement.
+2. Copy that entry's full SHA tag AND digest to prod using the command below,
+   substituting the exact accepted dev values. Do not resolve a mutable tag.
+3. Verify the rendered prod Pod image is the same `@sha256:` as dev; review the
+   diff contains only the intended prod image entry. Open the manual PR and
+   attach dev acceptance plus the digest receipt. Gitops's seven checks gate it.
+4. Merge/push only with the platform owner's activation approval; main can auto-advance
+   deploy. After the gate, a human manually syncs prod and observes imageID.
+
+```sh
+cd clusters/homelab/tenants/{{tenant}}/overlays/prod
+# TAG and DIGEST are copied from the accepted dev entry, never rebuilt.
+kustomize edit set image "{{image}}={{image}}:${TAG}@${DIGEST}"
+kustomize build .
+```
+
+Rollback uses a prior known-good tag+digest through the same reviewed gitops
+path. A local commit, successful app CI or uploaded receipt is not deployment
+proof. GP scaffolding can consume a verified image pin via `GP_IMAGE_DIGEST`
+(or programmatic `planNew({ imageDigest })`); it has no guessed fallback.

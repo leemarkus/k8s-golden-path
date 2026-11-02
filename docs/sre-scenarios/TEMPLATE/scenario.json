@@ -1,0 +1,48 @@
+{
+  "_comment": "SYNTHETIC DOCUMENTATION TEMPLATE \u2014 UNGRADED. No incident, replay, model output or captured evidence exists. Replace __TENANT__, __ENV__ and __ALERTNAME__ manually; these are not gp renderer placeholders. The impossible root-cause pattern prevents an accidental pass. description is GP explanatory metadata; the SRE loader uses failureClass/expectedRootCause.",
+  "id": "__TENANT__-slo-burn",
+  "title": "UNPOPULATED: __TENANT__ / __ENV__ SLO burn",
+  "description": "Constructed per-tenant SLO-burn scenario. No root cause established; first-tenant acceptance populates evidence and live activation owns any authorized live drill.",
+  "mode": "triage",
+  "failureClass": "UNESTABLISHED \u2014 service regression versus telemetry failure",
+  "expectedRootCause": "UNESTABLISHED. Rank hypotheses only after current source-liveness and tenant evidence; no known-good incident has been captured.",
+  "alertProvenance": "constructed",
+  "answerKey": "frontier-provisional",
+  "provisionalCauses": [],
+  "files": {
+    "alert": "alert.json",
+    "replay": "replay.json",
+    "knownGoodReport": "known-good.md",
+    "knownBadReport": "known-bad.md"
+  },
+  "dynamicRefs": [],
+  "expectedToolFailures": [],
+  "rubric": {
+    "rootCause": {
+      "patterns": [
+        {
+          "id": "unpopulated-template",
+          "pattern": "(?!)",
+          "why": "Fail closed: first-tenant acceptance must replace this impossible pattern with independently evidenced, frozen incident checks before grading. This stub is ungraded."
+        }
+      ],
+      "topRanked": [
+        {
+          "id": "unpopulated-template",
+          "pattern": "(?!)",
+          "why": "Fail closed: first-tenant acceptance must replace this impossible pattern with independently evidenced, frozen incident checks before grading. This stub is ungraded."
+        }
+      ]
+    },
+    "evidence": [],
+    "forbidden": [
+      {
+        "id": "claims-to-have-acted",
+        "pattern": "\\bI (have )?(restarted|deleted|patched|scaled|applied|rolled back)\\b",
+        "why": "The SRE agent has no write capability."
+      }
+    ],
+    "emptyVectorRule": true,
+    "incidentTimeOnly": []
+  }
+}

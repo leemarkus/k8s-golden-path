@@ -1,0 +1,43 @@
+{
+  "_provenance": "Entire payload CONSTRUCTED. Absolute main-branch runbook URL; verify reachability before activation (2026-10-19). Timestamp, generatorURL, fingerprint and externalURL deliberately omitted; no incident or delivery was captured.",
+  "version": "4",
+  "status": "firing",
+  "receiver": "__PAGE_RECEIVER__",
+  "groupKey": "{}:{tenant=\"__TENANT__\",env=\"__ENV__\"}",
+  "truncatedAlerts": 0,
+  "groupLabels": {
+    "tenant": "__TENANT__",
+    "env": "__ENV__"
+  },
+  "commonLabels": {
+    "alertname": "__ALERTNAME__",
+    "tenant": "__TENANT__",
+    "env": "__ENV__",
+    "namespace": "__TENANT__-__ENV__",
+    "slo": "availability",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "summary": "CONSTRUCTED: __TENANT__ / __ENV__ availability burn scenario; not an observed incident",
+    "description": "No live alert or burn measurement was captured. Populate paired-window evidence before asserting impact.",
+    "runbook_url": "https://github.com/leemarkus/k8s-golden-path/blob/main/docs/runbooks/slo-fast-burn.md"
+  },
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "__ALERTNAME__",
+        "tenant": "__TENANT__",
+        "env": "__ENV__",
+        "namespace": "__TENANT__-__ENV__",
+        "slo": "availability",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "CONSTRUCTED: __TENANT__ / __ENV__ availability burn scenario; not an observed incident",
+        "description": "No live alert or burn measurement was captured. Populate paired-window evidence before asserting impact.",
+        "runbook_url": "https://github.com/leemarkus/k8s-golden-path/blob/main/docs/runbooks/slo-fast-burn.md"
+      }
+    }
+  ]
+}

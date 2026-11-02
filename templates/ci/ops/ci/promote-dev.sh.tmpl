@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# HQ's clone -> kustomize edit -> bot commit -> one rebase/retry. No cluster API.
+set -euo pipefail
+umask 077
+[[ ${GITHUB_EVENT_NAME:-} == push && ${GITHUB_REF:-} == refs/heads/main ]] || exit 1
+[[ ${GITHUB_SHA:-} =~ ^[a-f0-9]{40}$ && ${DIGEST:-} =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+[[ ${IMAGE:-} == '{{image}}' ]] || exit 1
+[[ ${OVERLAY:-} == 'clusters/homelab/tenants/{{tenant}}/overlays/dev' ]] || exit 1
+[[ ${GITOPS_REPO:-} == git.example.com/platform/gitops ]] || exit 1
+[[ -n ${GITOPS_TOKEN:-} ]] || { echo 'GITOPS_TOKEN is required' >&2; exit 1; }
+work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gp-promote.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Keep the token out of remote URLs, process arguments and git config.
+cat > "$work/askpass" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' ci-bot ;;
+  *Password*) printf '%s\n' "$GITOPS_TOKEN" ;;
+  *) exit 1 ;;
+esac
+ASKPASS
+chmod 700 "$work/askpass"
+export GIT_ASKPASS="$work/askpass" GIT_TERMINAL_PROMPT=0
+# Disable any persistent host credential helper for this process tree.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
+git clone --depth 1 --branch main "https://${GITOPS_REPO}.git" "$work/gitops"
+cd "$work/gitops"
+( cd "$OVERLAY" && kustomize edit set image "${IMAGE}=${IMAGE}:sha-${GITHUB_SHA}@${DIGEST}" )
+if git diff --quiet; then echo 'Dev already uses this tag and digest'; exit 0; fi
+[[ $(git diff --name-only) == "$OVERLAY/kustomization.yaml" ]] || exit 1
+git config user.name ci-bot
+git config user.email ci-bot@example.com
+git add -- "$OVERLAY/kustomization.yaml"
+git commit -m "ci({{tenant}}): dev -> sha-${GITHUB_SHA} (digest ${DIGEST})"
+if git push origin HEAD:main; then exit 0; fi
+git pull --rebase origin main
+if git push origin HEAD:main; then exit 0; fi
+echo 'promote-dev could not fast-forward after one rebase retry' >&2
+exit 1

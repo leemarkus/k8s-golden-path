@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - guard
+# Observe is composed per environment by the overlays.
+# Namespace, ResourceQuota and LimitRange are platform-owned, outside this app.

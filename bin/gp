@@ -1,0 +1,45 @@
+#!/usr/bin/env node
+import { planNew, writePlan, kinds } from '../src/scaffold.mjs';
+import { verify } from '../src/verify.mjs';
+
+const usage = `Usage:
+  gp new <tenant> --kind static|node --app-repo <path> --gitops <path> [--dry-run]
+  gp verify <tenant-dir> [--node-digest sha256:...] [--nginx-digest sha256:...]
+  gp list-kinds`;
+try {
+  const [command, ...args] = process.argv.slice(2);
+  if (command === '--help' || command === '-h') console.log(usage);
+  else if (command === 'list-kinds' && !args.length) console.log(kinds.join('\n'));
+  else if (command === 'verify' && args.length >= 1) {
+    const directory = args.shift(); const options = {}; const seen = new Set();
+    const names = { '--node-digest': 'nodeDigest', '--nginx-digest': 'nginxDigest' };
+    while (args.length) {
+      const flag = args.shift();
+      if (seen.has(flag)) throw new Error(`Duplicate option: ${flag}`);
+      seen.add(flag);
+      if (!Object.hasOwn(names, flag) || !args[0] || args[0].startsWith('--')) throw new Error(`Unknown option or missing value: ${flag}`);
+      options[names[flag]] = args.shift();
+    }
+    const result = verify(directory, options);
+    if (result.failed) process.exitCode = 1;
+  } else if (command === 'new') {
+    const tenant = args.shift(); const options = { tenant }; const seen = new Set();
+    const names = { '--kind': 'kind', '--app-repo': 'appRepo', '--gitops': 'gitops' };
+    while (args.length) {
+      const flag = args.shift();
+      if (seen.has(flag)) throw new Error(`Duplicate option: ${flag}`);
+      seen.add(flag);
+      if (flag === '--dry-run') options.dryRun = true;
+      else if (Object.hasOwn(names, flag) && args[0] && !args[0].startsWith('--')) options[names[flag]] = args.shift();
+      else throw new Error(`Unknown option or missing value: ${flag}`);
+    }
+    const plan = planNew(options);
+    console.log(`${options.dryRun ? 'DRY RUN' : 'CREATE'} ${plan.files.length} files:`);
+    for (const file of plan.files) console.log(file.path);
+    if (!options.dryRun) writePlan(plan);
+    if (!plan.receipt.templateFiles) console.log('INCOMPLETE: templates are empty; only gp.json receipts are scaffolded (build, deploy, observe, guard and runbook stages pending).');
+  } else throw new Error(usage);
+} catch (error) {
+  console.error(`gp: ${error.message}`);
+  process.exitCode = 1;
+}
