@@ -93,3 +93,7 @@ Hostnames are placeholders: `registry.example.com`, `git.example.com/platform/gi
 The CLI, templates and tests are complete. All 55 tests pass, and `make verify` passes with the gates whose tools are installed; promtool, kind, conftest, the Docker build and kubeconform schemas report SKIP without their inputs. The first tenant, the internal build of my portfolio site, went live in its dev environment on the lab cluster on 30 October 2026 through this path and passed a critical-page alert drill. Prod waits on dev acceptance, a warning-board drill and approval.
 
 This repository is a curated public copy of a private one. The lab's private wiring (real hostnames, the live tenant and its credentials, and internal planning documents) stays in the private repository.
+
+## License
+
+[MIT](LICENSE)
